@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import os
 from fastapi import FastAPI, HTTPException, Query, Request
 import json
@@ -19,24 +20,12 @@ app = FastAPI()
 
 # Connect to MongoDB
 client = MongoClient(MONGO_URI)
-db = client["sample_mflix"]
-collection = db["embedded_movies"]
+db = client["servicio"]
+collection = db["systems"]
+embeddings_collection = db["embeddings"]
 
 # Initialize OpenAI Embeddings
 embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-
-# Initialize OpenAI LLM
-llm = OpenAI(openai_api_key=OPENAI_API_KEY, max_tokens=50)  # Limit tokens to save costs
-
-# Initialize MongoDB Atlas Vector Search
-vector_store = MongoDBAtlasVectorSearch(
-    collection=collection,
-    embedding=embeddings,
-    index_name="vector_index",  # Ensure this matches MongoDB index
-    text_key="plot",  # Field storing the text
-    embedding_key="plot_embedding"  # Field storing the vector embeddings
-)
-
 
 @app.get("/")
 def home():
@@ -46,7 +35,7 @@ def home():
     }
 
 
-@app.get("/movie/{movie_id}")
+""" @app.get("/movie/{movie_id}")
 def get_movie_by_id(movie_id: str):
     try:
         obj_id = ObjectId(movie_id)
@@ -59,14 +48,11 @@ def get_movie_by_id(movie_id: str):
         movie["_id"] = str(movie["_id"])  # Convert ObjectId to string
         return movie
     else:
-        raise HTTPException(status_code=404, detail="Movie not found")
+        raise HTTPException(status_code=404, detail="Movie not found") """
 
 
-@app.get("/search/")
+""" @app.get("/search/")
 def vector_search(query: str = Query(..., description="Text to search for similar movies")):
-    """
-    Search for movies based on a text query using MongoDBAtlasVectorSearch.
-    """
 
     # Find similar movies using MongoDBAtlasVectorSearch
     results = vector_store.similarity_search(query, k=3)  # Get top 3 most similar movies
@@ -91,7 +77,7 @@ def vector_search(query: str = Query(..., description="Text to search for simila
         "query": query,
         "related_movies": formatted_results,
         "response": ai_response 
-    }
+    } """
 
 @app.post("/system-created")
 async def system_created(request: Request):
@@ -106,5 +92,114 @@ async def system_created(request: Request):
         # db.systems.insert_one(system_data)  # Uncomment if using MongoDB
 
         return {"message": "Python received the system data successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/generate-embeddings/{system_id}")
+def generate_and_store_embeddings(system_id: str):
+    """
+    Genera y almacena embeddings para un sistema si aún no existen en la base de datos.
+    """
+    try:
+        obj_id = ObjectId(system_id)
+        category = "system"
+    except:
+        raise HTTPException(status_code=400, detail="Formato de ObjectId inválido.")
+
+    existing_embedding = embeddings_collection.find_one({"document_id": obj_id})
+    if existing_embedding:
+        return {"message": "Embeddings ya existen para este documento.", "document_id": obj_id}
+
+    system = collection.find_one({"_id": obj_id})
+    if not system:
+        raise HTTPException(status_code=404, detail="Sistema no encontrado.")
+
+    # datos para el sistema
+    system_name = system.get("system_name", "Desconocido")
+    system_code = system.get("system_code", "No especificado")
+    acquisition_date = system.get("acquisition_date", "Desconocida")
+
+    if isinstance(acquisition_date, datetime):
+        acquisition_date = acquisition_date.isoformat()
+
+    text = f"Nombre: {system_name}, Código: {system_code}, Adquisición: {acquisition_date}."
+
+    embedding = embeddings.embed_query(text)
+
+    embeddings_collection.insert_one({
+        "document_id": obj_id,
+        "text": text,
+        "category": category,
+        "embedding": embedding,
+        "created_at": system.get("created_at", datetime.now(timezone.utc)).isoformat(),
+        "updated_at": system.get("updated_at", datetime.now(timezone.utc)).isoformat()
+    })
+
+    return {"message": "Embeddings generados y almacenados correctamente.", "document_id": system_id}
+
+    
+@app.get("/get-embeddings/{system_id}")
+def get_embeddings(document_id: str):
+    try:
+        obj_id = ObjectId(document_id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid ObjectId format")
+
+    document = embeddings_collection.find_one({"document_id": obj_id})
+
+    if document:
+        document["_id"] = str(document["_id"])
+        document["document_id"] = str(document["document_id"]) 
+        return document
+    else:
+        raise HTTPException(status_code=404, detail="document not found")
+    
+@app.get("/search/")
+def vector_search(query: str = Query(..., description="Texto a buscar en la base de datos")):
+    """
+    Realiza una búsqueda semántica en MongoDB usando `$vectorSearch` y siempre devuelve el resultado más similar.
+    """
+    try:
+        query_embedding = embeddings.embed_query(query)
+
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "path": "embedding",
+                    "queryVector": query_embedding,
+                    "numCandidates": 200,
+                    "limit": 5, 
+                    "metric": "cosine"
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "document_id": 1,
+                    "category": 1,
+                    "text": 1,
+                    "score": {"$meta": "vectorSearchScore"}
+                }
+            },
+            {
+                "$sort": {"score": -1} 
+            }
+        ]
+
+        results = list(collection.aggregate(pipeline))
+
+        if results:
+            return {
+                "query": query,
+                "similar_systems": results
+            }
+        
+        return {
+            "query": query,
+            "message": "No se encontraron coincidencias exactas, pero aquí está lo más cercano:",
+            "similar_systems": [results[0]] if results else []
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
