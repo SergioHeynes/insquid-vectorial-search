@@ -21,7 +21,6 @@ app = FastAPI()
 # Connect to MongoDB
 client = MongoClient(MONGO_URI)
 db = client["servicio"]
-collection = db["systems"]
 embeddings_collection = db["embeddings"]
 
 # Initialize OpenAI Embeddings
@@ -50,37 +49,34 @@ async def system_created(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
-@app.post("/generate-embeddings/{system_id}")
-def generate_and_store_embeddings(system_id: str):
+@app.post("/generate-embeddings/category/{category}/{_id}")
+def generate_and_store_embeddings(_id: str, category: str):
     try:
-        obj_id = ObjectId(system_id)
-        category = "system"
+        obj_id = ObjectId(_id)
     except:
         raise HTTPException(status_code=400, detail="Formato de ObjectId inválido.")
+    
+    match category:
+        case "system":
+            text, created_at, updated_at = get_system(obj_id)
+        case "service":
+            text = ""
+        case "customer":
+            text = ""
+        case "contract":
+            text = ""
+        case _:
+            return
 
-    system = collection.find_one({"_id": obj_id})
-    if not system:
-        raise HTTPException(status_code=404, detail="Sistema no encontrado.")
-
-    # Asegurarnos de que los datos sean descriptivos
-    system_name = system.get("system_name", "Desconocido")
-    system_code = system.get("system_code", "No especificado")
-    acquisition_date = system.get("acquisition_date", "Desconocida")
-
-    if isinstance(acquisition_date, datetime):
-        acquisition_date = acquisition_date.isoformat()
-
-    text = f"{system_name}, código {system_code}, adquirido en {acquisition_date}."
-
-    embedding = embeddings.embed_query(text)  # Generar embedding con OpenAI
+    embedding = embeddings.embed_query(text)
 
     embeddings_collection.insert_one({
         "document_id": obj_id,
         "text": text,
         "category": category,
         "embedding": embedding,
-        "created_at": system.get("created_at", datetime.now(timezone.utc)).isoformat(),
-        "updated_at": system.get("updated_at", datetime.now(timezone.utc)).isoformat()
+        "created_at": created_at,
+        "updated_at": updated_at
     })
 
 @app.get("/get-embeddings/{system_id}")
@@ -99,58 +95,8 @@ def get_embeddings(system_id: str):
     else:
         raise HTTPException(status_code=404, detail="document not found")
     
-@app.get("/search-2/")
-def vector_search(query: str = Query(..., description="Texto a buscar en la base de datos")):
-    """
-    Realiza una búsqueda semántica en MongoDB usando `$vectorSearch` y siempre devuelve el resultado más similar.
-    """
-    try:
-        query_embedding = embeddings.embed_query(query)
-
-        pipeline = [
-            {
-                "$vectorSearch": {
-                    "index": "vector_index",
-                    "path": "embedding",
-                    "queryVector": query_embedding,
-                    "numCandidates": 200,
-                    "limit": 5, 
-                    "metric": "cosine"
-                }
-            },
-            {
-                "$project": {
-                    "_id": 0,
-                    "document_id": 1,
-                    "category": 1,
-                    "text": 1,
-                    "score": {"$meta": "vectorSearchScore"}
-                }
-            },
-            {
-                "$sort": {"score": -1} 
-            }
-        ]
-
-        results = list(collection.aggregate(pipeline))
-
-        if results:
-            return {
-                "query": query,
-                "similar_systems": results
-            }
-        
-        return {
-            "query": query,
-            "message": "No se encontraron coincidencias exactas, pero aquí está lo más cercano:",
-            "similar_systems": [results[0]] if results else []
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-  
 # Initialize OpenAI LLM
-llm = OpenAI(openai_api_key=OPENAI_API_KEY, max_tokens=50)  # Limit tokens to save costs
+llm = OpenAI(openai_api_key=OPENAI_API_KEY, max_tokens=100)  # Limit tokens to save costs
 
 @app.get("/search")
 def vector_search(query: str = Query(..., description="Texto a buscar en la base de datos")):
@@ -207,8 +153,65 @@ def buscar_en_mongodb(query_embedding):
 
 def generar_respuesta(consulta, results):
     resultados_texto = "\n".join(
-        [f"- idenfiticador: {r['document_id']}, Categoria: {r['category']}, Texto: {r['text']}" for r in results]
+        [f"Categoria: {r['category']}, Texto: {r['text']}" for r in results]
     )
-    prompt = f"Un usuario preguntó: \"{consulta}\". Basado en los siguientes datos encontrados, responde de manera útil:\n{resultados_texto}"
+    prompt = f"Un usuario preguntó: \"{consulta}\". Basado en los siguientes datos encontrados, responde de manera precisa, corta y clara:\n{resultados_texto}, sino encuentras relación no fuerces la respuesta"
     
     return llm.predict(prompt)
+
+def get_system(_id: ObjectId):
+    document = db["system"].find_one({"_id": _id})
+    
+    if not document:
+        raise HTTPException(status_code=404, detail="Sistema no encontrado.")
+
+    # detalle del sistema
+    system_name = document.get("system_name")
+    system_type = str(document.get("system_type", {}).get("$oid", "Sin tipo de sistema"))
+    system_code = document.get("system_code", "No cuenta con código el sistema")
+
+    acquisition_date = format_date(document.get("acquisition_date"))
+    delivery_date = format_date(document.get("delivery_date"))
+    created_at = format_date(document.get("created_at"))
+    updated_at = format_date(document.get("updated_at"))
+
+    # cliente
+    customer = document.get("customer", {})
+    customer_id = str(customer.get("customer_id", {}).get("$oid", "No especificado"))
+    branch_id = str(customer.get("branch_id", {}).get("$oid", "No especificado"))
+    department_id = str(customer.get("department_id", {}).get("$oid", "No especificado"))
+
+    # Equipos
+    equipments = document.get("equipments", [])
+    equipment_details = []
+    for eq in equipments:
+        eq_name = eq.get("equipment_name", "Equipo desconocido")
+        eq_serial = eq.get("serial_equipment", "No especificado")
+        eq_model = eq.get("model", "No especificado")
+        eq_price = eq.get("price", {}).get("$numberDouble", "0.0")
+        eq_acquisition_date = format_date(eq.get("acquisition_date"))
+        equipment_details.append(f"{eq_name} (Modelo: {eq_model}, Serie: {eq_serial}, Precio: ${eq_price}, Adquirido: {eq_acquisition_date})")
+
+    equipment_text = " | ".join(equipment_details) if equipment_details else "Sin equipos asociados."
+
+    # Construcción del texto para embeddings
+    text = (
+        f"Este sistema se llama {system_name} con código {system_code}. "
+        f"Es del tipo {system_type} y fue adquirido el {acquisition_date}. "
+        f"Se entregó el {delivery_date}. Pertenece al cliente con ID {customer_id}, "
+        f"sucursal {branch_id} y departamento {department_id}. "
+        f"Equipos asociados: {equipment_text}. "
+        f"Documento creado el {created_at} y actualizado el {updated_at}."
+    )
+
+    return {
+        "text": text,
+        "created_at": created_at,
+        "updated_at": updated_at
+    }
+
+def format_date(timestamp):
+    """Convierte timestamps de MongoDB a formato ISO 8601."""
+    if isinstance(timestamp, dict) and "$date" in timestamp:
+        return datetime.fromtimestamp(timestamp["$date"]["$numberLong"] / 1000, tz=timezone.utc).isoformat()
+    return "Sin fecha"
