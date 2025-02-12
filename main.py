@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 import os
+
+from openai import BaseModel
 from fastapi import FastAPI, HTTPException, Query, Request
 import json
 from dotenv import load_dotenv
@@ -49,35 +51,37 @@ async def system_created(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
-@app.post("/generate-embeddings/category/{category}/{_id}")
-def generate_and_store_embeddings(_id: str, category: str):
+class EmbeddingRequest(BaseModel):
+    _id: str
+    category: str
+    summary: str
+    
+@app.post("/generate-embeddings")
+def generate_and_store_embeddings(request: EmbeddingRequest):
     try:
-        obj_id = ObjectId(_id)
+        obj_id = ObjectId(request._id)
     except:
         raise HTTPException(status_code=400, detail="Formato de ObjectId inválido.")
     
-    match category:
-        case "system":
-            text, created_at, updated_at = get_system(obj_id)
-        case "service":
-            text = ""
-        case "customer":
-            text = ""
-        case "contract":
-            text = ""
-        case _:
-            return
-
-    embedding = embeddings.embed_query(text)
-
-    embeddings_collection.insert_one({
+    if not request.summary:
+        raise HTTPException(status_code=400, detail="El campo 'summary' es obligatorio.")
+    
+    now = datetime.now(timezone.utc).isoformat()
+    
+    embedding = embeddings.embed_query(request.summary)
+    
+    document = {
         "document_id": obj_id,
-        "text": text,
-        "category": category,
+        "text": request.summary,
+        "category": request.category,
         "embedding": embedding,
-        "created_at": created_at,
-        "updated_at": updated_at
-    })
+        "created_at": now,
+        "updated_at": now
+    }
+
+    embeddings_collection.insert_one(document)
+    
+    return document
 
 @app.get("/get-embeddings/{system_id}")
 def get_embeddings(system_id: str):
