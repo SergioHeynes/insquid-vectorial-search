@@ -52,14 +52,14 @@ async def system_created(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
     
 class EmbeddingRequest(BaseModel):
-    _id: str
+    id: str
     category: str
     summary: str
     
 @app.post("/generate-embeddings")
 def generate_and_store_embeddings(request: EmbeddingRequest):
     try:
-        obj_id = ObjectId(request._id)
+        obj_id = ObjectId(request.id)
     except:
         raise HTTPException(status_code=400, detail="Formato de ObjectId inválido.")
     
@@ -80,8 +80,15 @@ def generate_and_store_embeddings(request: EmbeddingRequest):
     }
 
     embeddings_collection.insert_one(document)
-    
-    return document
+
+    return {
+        "document_id": str(obj_id),
+        "text": request.summary,
+        "category": request.category,
+        "embedding": embedding,
+        "created_at": now,
+        "updated_at": now
+    }
 
 @app.get("/get-embeddings/{system_id}")
 def get_embeddings(system_id: str):
